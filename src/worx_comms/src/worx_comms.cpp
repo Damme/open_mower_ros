@@ -178,7 +178,7 @@ void highLevelStatusReceived(const mower_msgs::HighLevelStatus::ConstPtr &msg) {
     rapidjson::Document document;
     rapidjson::Document::AllocatorType* allocator;
     rapidjson::StringBuffer buffer;
-    rapidjson::Writer<rapidjson::StringBuffer>* writer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
     rapidjson::Value setObject; 
     document.SetObject();
     allocator = &document.GetAllocator();
@@ -199,10 +199,9 @@ uint8 HIGH_LEVEL_STATE_RECORDING=3
             document.SetObject();
             setObject.SetObject();
             document.AddMember("MOTORREQ_ENABLE", setObject, *allocator);
-
             buffer.Clear();
-            writer = new rapidjson::Writer<rapidjson::StringBuffer>(buffer);
-            document.Accept(*writer);
+            writer.Reset(buffer);
+            document.Accept(writer);
 
             boost::unique_lock<boost::mutex> lock(spi_tx_queue_mutex);
             spi_tx_queue.push(buffer.GetString());
@@ -211,10 +210,9 @@ uint8 HIGH_LEVEL_STATE_RECORDING=3
             document.SetObject();
             setObject.SetObject();
             document.AddMember("MOTORREQ_DISABLE", setObject, *allocator);
-
             buffer.Clear();
-            writer = new rapidjson::Writer<rapidjson::StringBuffer>(buffer);
-            document.Accept(*writer);
+            writer.Reset(buffer);
+            document.Accept(writer);
 
             boost::unique_lock<boost::mutex> lock(spi_tx_queue_mutex);
             spi_tx_queue.push(buffer.GetString());
@@ -350,7 +348,7 @@ void spi_thread(std::atomic<bool>& keep_running, ros::NodeHandle& n, const std::
     char txBuffer[buflen];
     char rxmsgBuffer[buflen];
     bool receiving = false;
-    uint8_t rxByte;
+    uint8_t rxByte = 0;
     size_t rxPos = 0;
     
     // Initialize ROS time
@@ -435,10 +433,11 @@ int main(int argc, char **argv) {
     rapidjson::Document document;
     rapidjson::Document::AllocatorType* allocator;
     rapidjson::StringBuffer buffer;
-    rapidjson::Writer<rapidjson::StringBuffer>* writer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
     rapidjson::Value setObject; 
     document.SetObject();
     allocator = &document.GetAllocator();
+    ParseResult result;
 
     ros::NodeHandle n;
     ros::NodeHandle paramNh("~");
@@ -455,10 +454,12 @@ int main(int argc, char **argv) {
 
     if (!paramNh.getParam("wheel_ticks_per_m",wheel_ticks_per_m)) {
         ROS_ERROR_STREAM("wheel_ticks_per_m not set. Quitting.");
+        return 1;
     }
 
     if (!paramNh.getParam("wheel_distance_m",wheel_distance_m)) {
         ROS_ERROR_STREAM("wheel_distance_m not set. Quitting.");
+        return 1;
     }
  
     // Fire up the communication thread!
@@ -485,12 +486,13 @@ int main(int argc, char **argv) {
     std::string rxMsg;
 
     ros::Time last_ping_time = ros::Time::now();
+    ros::Time current_time = ros::Time::now();
 
     spinner.start();
     ros::Duration(0.5).sleep(); // sleep for half a second
     
     while (ros::ok() && keep_running.load()) {
-        ros::Time current_time = ros::Time::now();
+        current_time = ros::Time::now();
 
         // Ping to tell worx we are still alive, will reset watchdogSPI in worx fw if recieved.
         // this could be moved to a timer (created by spithread if all is well) instead. (half implemented - ping_timer() )
@@ -498,14 +500,12 @@ int main(int argc, char **argv) {
             pingCounter++;
             last_ping_time = current_time;
 
-            rapidjson::Document document;
             document.SetObject();
             rapidjson::Value pingObject(rapidjson::kObjectType);
             pingObject.AddMember("count", pingCounter, document.GetAllocator());
             document.AddMember("ping", pingObject, document.GetAllocator());
-
             buffer.Clear();
-            rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+            writer.Reset(buffer);
             document.Accept(writer);
 
             boost::unique_lock<boost::mutex> lock(spi_tx_queue_mutex);
@@ -523,7 +523,7 @@ int main(int argc, char **argv) {
         }
 
         
-        ParseResult result = document.Parse(rxMsg.c_str());
+        result = document.Parse(rxMsg.c_str());
         if (result) {
             if (document.HasMember("Analog")) {
                 //{"Analog":{"Rain":3850,"boardTemp":3089}} // Boardtemp raw value unknown conversion
@@ -571,8 +571,8 @@ int main(int argc, char **argv) {
         document.AddMember("MOTORREQ_DISABLE", setObject, *allocator);
 
         buffer.Clear();
-        writer = new rapidjson::Writer<rapidjson::StringBuffer>(buffer);
-        document.Accept(*writer);
+        writer.Reset(buffer);
+        document.Accept(writer);
 
         boost::unique_lock<boost::mutex> lock(spi_tx_queue_mutex);
         spi_tx_queue.push(buffer.GetString());
