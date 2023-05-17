@@ -250,8 +250,6 @@ void processMotorTicks(const rapidjson::Value& MotorPulse) {
     wheel_tick_msg.wheel_tick_factor = static_cast<unsigned int>(wheel_ticks_per_m);
     wheel_tick_msg.stamp = ros::Time::now();
 
-    // Reverse the one that is reversed direction!
-
     if (MotorPulse.HasMember("Left"))
         wheel_tick_msg.wheel_ticks_rl = MotorPulse["Left"].GetInt();
     if (MotorPulse.HasMember("DirLeft"))
@@ -299,7 +297,7 @@ void publishStatus() {
 
     status_msg.v_battery = v_battery;
     if (charge_current > 0) {
-        status_msg.v_charge = 28;
+        status_msg.v_charge = 30;
         status_msg.charge_current = charge_current;
     } else {
         status_msg.v_charge = 0;
@@ -437,7 +435,6 @@ int main(int argc, char **argv) {
     rapidjson::Value setObject; 
     document.SetObject();
     allocator = &document.GetAllocator();
-    ParseResult result;
 
     ros::NodeHandle n;
     ros::NodeHandle paramNh("~");
@@ -502,14 +499,16 @@ int main(int argc, char **argv) {
 
             document.SetObject();
             rapidjson::Value pingObject(rapidjson::kObjectType);
-            pingObject.AddMember("count", pingCounter, document.GetAllocator());
-            document.AddMember("ping", pingObject, document.GetAllocator());
+            pingObject.AddMember("count", pingCounter, *allocator);
+            document.AddMember("ping", pingObject, *allocator);
             buffer.Clear();
             writer.Reset(buffer);
             document.Accept(writer);
 
             boost::unique_lock<boost::mutex> lock(spi_tx_queue_mutex);
             spi_tx_queue.push(buffer.GetString());
+            document.SetNull();
+            document.GetAllocator().Clear();
         }
 
         // Check and fetch message from queue
@@ -523,7 +522,7 @@ int main(int argc, char **argv) {
         }
 
         
-        result = document.Parse(rxMsg.c_str());
+        ParseResult result = document.Parse(rxMsg.c_str());
         if (result) {
             if (document.HasMember("Analog")) {
                 //{"Analog":{"Rain":3850,"boardTemp":3089}} // Boardtemp raw value unknown conversion
@@ -560,6 +559,9 @@ int main(int argc, char **argv) {
                 //{"MotorPWM":{"Left":0,"Right":0,"Mow":0}}
             }
         }
+        document.SetNull();
+        document.GetAllocator().Clear();
+
         rxMsg.clear();
         loopDelay.sleep();
     }
