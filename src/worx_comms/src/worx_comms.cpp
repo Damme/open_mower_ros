@@ -1,3 +1,21 @@
+// Created by Clemens Elflein on 3/28/22.
+// Rewritten by Daniel Wiegert on 21 May 2023.
+// Copyright (c) 2022 Clemens Elflein, Daniel Wiegert. All rights reserved.
+//
+// This work is licensed under a Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License.
+//
+// Feel free to use the design in your private/educational projects, but don't try to sell the design or products based on it without getting our consent first.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+//
+//
+
 #include <queue>
 #include <atomic>
 
@@ -146,6 +164,9 @@ void publishActuators() {
 
         boost::unique_lock<boost::mutex> lock(spi_tx_queue_mutex);
         spi_tx_queue.push(buffer.GetString());
+        document.GetAllocator().Clear();
+        document.SetNull();
+
     }
     
 }
@@ -219,6 +240,8 @@ uint8 HIGH_LEVEL_STATE_RECORDING=3
             ROS_INFO("highLevelStatusReceived: %i", msg->state);
         }
     }
+    document.GetAllocator().Clear();
+    document.SetNull();
 }
 
 void processI2C_IMU(const rapidjson::Value& i2c_imu) {
@@ -507,8 +530,8 @@ int main(int argc, char **argv) {
 
             boost::unique_lock<boost::mutex> lock(spi_tx_queue_mutex);
             spi_tx_queue.push(buffer.GetString());
-            document.SetNull();
             document.GetAllocator().Clear();
+            document.SetNull();
         }
 
         // Check and fetch message from queue
@@ -521,6 +544,13 @@ int main(int argc, char **argv) {
             }
         }
 
+        if(rxMsg.find("DEBUG") == 0) {
+            ROS_WARN("!!! %s", rxMsg.c_str());
+        }
+
+        if(rxMsg.find("State") == 0) {
+            ROS_INFO("!!! %s", rxMsg.c_str());
+        }
         
         ParseResult result = document.Parse(rxMsg.c_str());
         if (result) {
@@ -559,8 +589,8 @@ int main(int argc, char **argv) {
                 //{"MotorPWM":{"Left":0,"Right":0,"Mow":0}}
             }
         }
-        document.SetNull();
         document.GetAllocator().Clear();
+        document.SetNull();
 
         rxMsg.clear();
         loopDelay.sleep();
