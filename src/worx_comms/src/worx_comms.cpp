@@ -88,27 +88,30 @@ int last_speed_l = 0, last_speed_r = 0, last_speed_mow = 0;
 double wheel_ticks_per_m = 0.0;
 double wheel_distance_m = 0.0;
 
-int last_highLevelStatusReceived_state = 0;
+int ros_msg_state = -1;
+std::string ros_msg_substate = "";
 
 float v_battery = 0;
 float charge_current = 0;
 float battery_temp = 0;
 
+#define MAXSPEED 1320 // 2047 = 100% PWM, 1320 = 65% PWM
+
 void velReceived(const geometry_msgs::Twist::ConstPtr &msg) {
     last_cmd_vel = ros::Time::now();
-    speed_r = (msg->linear.x + 0.5*wheel_distance_m*msg->angular.z) * 1500;
-    speed_l = (msg->linear.x - 0.5*wheel_distance_m*msg->angular.z) * 1500;
+    speed_r = (msg->linear.x + 0.5*wheel_distance_m*msg->angular.z) * MAXSPEED;
+    speed_l = (msg->linear.x - 0.5*wheel_distance_m*msg->angular.z) * MAXSPEED;
     
 
-    if (speed_l >= 1500) {
-        speed_l = 1500;
-    } else if (speed_l <= -1500) {
-        speed_l = -1500;
+    if (speed_l >= MAXSPEED) {
+        speed_l = MAXSPEED;
+    } else if (speed_l <= -MAXSPEED) {
+        speed_l = -MAXSPEED;
     }
-    if (speed_r >= 1500) {
-        speed_r = 1500;
-    } else if (speed_r <= -1500) {
-        speed_r = -1500;
+    if (speed_r >= MAXSPEED) {
+        speed_r = MAXSPEED;
+    } else if (speed_r <= -MAXSPEED) {
+        speed_r = -MAXSPEED;
     }
 }
 
@@ -195,7 +198,7 @@ bool setEmergencyStop(mower_msgs::EmergencyStopSrvRequest &req, mower_msgs::Emer
     return true;
 }
 
-void highLevelStatusReceived(const mower_msgs::HighLevelStatus::ConstPtr &msg) {
+void rosStatusRecieved(const mower_msgs::HighLevelStatus::ConstPtr &msg) {
     rapidjson::Document document;
     rapidjson::Document::AllocatorType* allocator;
     rapidjson::StringBuffer buffer;
@@ -213,9 +216,19 @@ uint8 HIGH_LEVEL_STATE_NULL=0
 uint8 HIGH_LEVEL_STATE_IDLE=1
 uint8 HIGH_LEVEL_STATE_AUTONOMOUS=2
 uint8 HIGH_LEVEL_STATE_RECORDING=3
+
+uint8 SUBSTATE_1=0
+uint8 SUBSTATE_2=1
+uint8 SUBSTATE_3=2
+uint8 SUBSTATE_4=3
+uint8 SUBSTATE_SHIFT=6
     */
-    if (last_highLevelStatusReceived_state != msg->state ) {
-        last_highLevelStatusReceived_state = msg->state;
+   if (ros_msg_substate != msg->sub_state_name ) {
+        ros_msg_substate = msg->sub_state_name;
+        ROS_INFO("### rosSubStatusRecieved: %s", msg->sub_state_name.c_str());
+   }
+    if (ros_msg_state != msg->state ) {
+        ros_msg_state = msg->state;
         if (msg->state > 1) {
             document.SetObject();
             setObject.SetObject();
@@ -226,7 +239,7 @@ uint8 HIGH_LEVEL_STATE_RECORDING=3
 
             boost::unique_lock<boost::mutex> lock(spi_tx_queue_mutex);
             spi_tx_queue.push(buffer.GetString());
-            ROS_INFO("highLevelStatusReceived: %i", msg->state);
+            ROS_INFO("### rosStatusRecieved: %i", msg->state);
         } else {
             document.SetObject();
             setObject.SetObject();
@@ -237,7 +250,7 @@ uint8 HIGH_LEVEL_STATE_RECORDING=3
 
             boost::unique_lock<boost::mutex> lock(spi_tx_queue_mutex);
             spi_tx_queue.push(buffer.GetString());
-            ROS_INFO("highLevelStatusReceived: %i", msg->state);
+            ROS_INFO("### rosStatusRecieved: %i", msg->state);
         }
     }
     document.GetAllocator().Clear();
@@ -377,7 +390,7 @@ void spi_thread(std::atomic<bool>& keep_running, ros::NodeHandle& n, const std::
     
     // Configure the SPI settings
     spi_config.mode=0;
-    spi_config.speed=1600000;
+    spi_config.speed=1500000;
     spi_config.delay=0;
     spi_config.bits_per_word=8;
 
@@ -412,6 +425,7 @@ void spi_thread(std::atomic<bool>& keep_running, ros::NodeHandle& n, const std::
                 txBuffer[0] = SOF;
                 txBuffer[strlen(txBuffer)] = EOF;
                 //ROS_INFO("<<< %s", txBuffer + 1);
+                ROS_INFO_STREAM_THROTTLE(1, "<<< " << txMsg.c_str());
             }
         }
         
@@ -492,7 +506,7 @@ int main(int argc, char **argv) {
     ros::ServiceServer mow_service = n.advertiseService("mower_service/mow_enabled", setMowEnabled);
     ros::ServiceServer emergency_service = n.advertiseService("mower_service/emergency", setEmergencyStop);
     ros::Subscriber cmd_vel_sub = n.subscribe("cmd_vel", 0, velReceived, ros::TransportHints().tcpNoDelay(true));
-    ros::Subscriber high_level_status_sub = n.subscribe("/mower_logic/current_state", 0, highLevelStatusReceived);
+    ros::Subscriber ros_status_sub = n.subscribe("/mower_logic/current_state", 0, rosStatusRecieved);
     ros::Timer publish_timer = n.createTimer(ros::Duration(0.02), publishActuatorsTimerTask);
 
     sensor_mag_msg.header.seq = 0;
@@ -541,6 +555,8 @@ int main(int argc, char **argv) {
                 rxMsg = spi_rx_queue.front();
                 spi_rx_queue.pop();
                 //ROS_INFO(">>> %s", rxMsg.c_str()); // we need to rate limit this or something, logs gets large... fast.. 
+                // ROS_INFO_STREAM_THROTTLE exists apparently lol
+
             }
         }
 
@@ -551,15 +567,16 @@ int main(int argc, char **argv) {
         if(rxMsg.find("State") == 0) {
             ROS_INFO("!!! %s", rxMsg.c_str());
         }
-        
+
         ParseResult result = document.Parse(rxMsg.c_str());
         if (result) {
             if (document.HasMember("Analog")) {
                 //{"Analog":{"Rain":3850,"boardTemp":3089}} // Boardtemp raw value unknown conversion
             }
             if (document.HasMember("Battery")) {
-                ROS_INFO(">>> %s", rxMsg.c_str());
                 //{"Battery":{"mV":28014,"mA":0,"Temp":152,"CellLow":1,"CellHigh":1,"InCharger":1}}
+                ROS_INFO_STREAM_THROTTLE(10, ">>> " << rxMsg.c_str());
+                
                 const rapidjson::Value& json = document["Battery"];
                 if (json.HasMember("mV"))
                     v_battery = (float)json["mV"].GetInt() / 1000.0;
@@ -573,6 +590,7 @@ int main(int argc, char **argv) {
             }
             if (document.HasMember("Digital")) {
                 //{"Digital":{"Stuck":1,"Stuck2":1,"Door":1,"Door2":1,"Lift":1,"Collision":0,"Stop":0,"Rain":0}}
+                ROS_INFO_STREAM_THROTTLE(2, ">>> " << rxMsg.c_str());
             }
             if (document.HasMember("I2C_IMU")) {
                 //{"I2C_IMU":{"Yaw":-117,"Pitch":-316,"Roll":4,"AccX":63,"AccY":52,"AccZ":1034}}
@@ -580,13 +598,22 @@ int main(int argc, char **argv) {
             }
             if (document.HasMember("MotorCurrent")) {
                 //{"MotorCurrent":{"Left":102,"Right":15,"MowRPM":0}}
+                ROS_INFO_STREAM_THROTTLE(2, ">>> " << rxMsg.c_str());
             }
             if (document.HasMember("MotorPulse")) {
                 //{"MotorPulse":{"Left":890,"Right":884,"Mow":2,"DirLeft":0,"DirRight":0}}
+                ROS_INFO_STREAM_THROTTLE(2, ">>> " << rxMsg.c_str());
                 processMotorTicks(document["MotorPulse"]);
             }
             if (document.HasMember("MotorPWM")) {
                 //{"MotorPWM":{"Left":0,"Right":0,"Mow":0}}
+                ROS_INFO_STREAM_THROTTLE(5, ">>> " << rxMsg.c_str());
+            }
+            if (document.HasMember("powerState")) {
+                ROS_INFO_STREAM("!!! " << rxMsg.c_str());
+            }
+            if (document.HasMember("motorState")) {
+                ROS_INFO_STREAM("!!! " << rxMsg.c_str());
             }
         }
         document.GetAllocator().Clear();
