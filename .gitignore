@@ -1,4 +1,5 @@
 # ignore build and devel folders
+.github/workflows/
 build/
 devel/
 .catkin_workspace
