@@ -79,7 +79,6 @@ mower_msgs::HighLevelStatus high_level_status;
 
 std::atomic<bool> mowerEnabled;
 
-
 Behavior *currentBehavior = &IdleBehavior::INSTANCE;
 
 
@@ -241,17 +240,18 @@ bool setMowerEnabled(bool enabled)
     // status change ?
     if (mowerEnabled != enabled)
     {
+        ros::Time started = ros::Time::now();
         mower_msgs::MowerControlSrv mow_srv;
         mow_srv.request.mow_enabled = enabled;
-        ros::Time started = ros::Time::now();
-        ROS_WARN_STREAM("#### om_mower_logic: setMowerEnabled(" << enabled << ") call");
+        mow_srv.request.mow_direction = started.sec & 0x1; // Randomize mower direction on second
+        ROS_WARN_STREAM("#### om_mower_logic: setMowerEnabled(" << enabled << ", " << static_cast<unsigned>(mow_srv.request.mow_direction) << ") call");
 
         ros::Rate retry_delay(1);
         bool success = false;
         for(int i = 0; i < 10; i++) {
             if(mowClient.call(mow_srv)) {
-                ROS_INFO_STREAM("successfully set mower enabled to " << enabled);
-                success = true;
+                ROS_INFO_STREAM("successfully set mower enabled to " << enabled << " (direction " << static_cast<unsigned>(mow_srv.request.mow_direction) << ")");
+                    success = true;
                 break;
             }
             ROS_ERROR_STREAM("Error setting mower enabled to " << enabled << ". Retrying.");
@@ -262,7 +262,7 @@ bool setMowerEnabled(bool enabled)
             ROS_ERROR_STREAM("Error setting mower enabled. THIS SHOULD NEVER HAPPEN");
         }
 
-        ROS_WARN_STREAM("#### om_mower_logic: setMowerEnabled(" << enabled << ") call completed within " << (ros::Time::now()-started).toSec() << "s");
+        ROS_WARN_STREAM("#### om_mower_logic: setMowerEnabled(" << enabled << ", " << static_cast<unsigned>(mow_srv.request.mow_direction) << ") call completed within " << (ros::Time::now() - started).toSec() << "s");
         mowerEnabled = enabled;
     }
 
@@ -472,7 +472,8 @@ void checkSafety(const ros::TimerEvent &timer_event) {
     if (
             dockingNeeded &&
             currentBehavior != &DockingBehavior::INSTANCE &&
-            currentBehavior != &UndockingBehavior::RETRY_INSTANCE
+            currentBehavior != &UndockingBehavior::RETRY_INSTANCE &&
+            currentBehavior != &IdleBehavior::INSTANCE
         ) {
         abortExecution();
     }
@@ -763,12 +764,16 @@ int main(int argc, char **argv) {
     // release emergency if it was set
     setEmergencyMode(false);
 
+    // initialise the shared state object to be passed into the behaviors
+    auto shared_state = std::make_shared<sSharedState>();
+    shared_state->active_semiautomatic_task = false;
+    shared_state->semiautomatic_task_paused = false;
+
+
     // Behavior execution loop
     while (ros::ok()) {
         if (currentBehavior != nullptr) {
-
-
-            currentBehavior->start(last_config);
+            currentBehavior->start(last_config, shared_state);
             Behavior *newBehavior = currentBehavior->execute();
             currentBehavior->exit();
             currentBehavior = newBehavior;

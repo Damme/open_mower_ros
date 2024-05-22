@@ -1,3 +1,7 @@
+## I am available for hire
+Hello! With a background in software engineering, embedded programming, hardware design, and robotics, I'm on the lookout for new challenges.
+If you're in search of someone with my skills, let's team up and create something amazing! https://x-tech.online/
+
 # ROS Workspace
 
 [![Build](https://github.com/ClemensElflein/open_mower_ros/actions/workflows/build-image.yaml/badge.svg)](https://github.com/ClemensElflein/open_mower_ros/actions/workflows/build-image.yaml)
@@ -56,7 +60,7 @@ roslaunch open_mower open_mower.launch
 Before you launch `open_mower` package, env vars with configuration have to be set.
 
 ```bash
-cp src/open_mower/open_mower/config/mower_config.sh.example mower_config.sh
+cp src/open_mower/config/mower_config.sh.example mower_config.sh
 source mower_config.sh # it's expected to adjust the file
 ```
 

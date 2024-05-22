@@ -31,6 +31,7 @@ private:
     std::vector<xbot_msgs::ActionInfo> actions;
 
     bool skip_area;
+    bool skip_path;
     bool create_mowing_plan(int area_index);
 
     bool execute_mowing_plan();
@@ -38,6 +39,13 @@ private:
     // Progress
     bool mowerEnabled = false;
     std::vector<slic3r_coverage_planner::Path> currentMowingPaths;
+
+    ros::Time last_checkpoint;
+    int currentMowingPath;
+    int currentMowingArea;
+    int currentMowingPathIndex;
+    std::string currentMowingPlanDigest;
+    double currentMowingAngleIncrementSum;
 
 
 public:
@@ -76,6 +84,10 @@ public:
     void handle_action(std::string action) override;
 
     void update_actions();
+
+    void checkpoint();
+
+    bool restore_checkpoint();
 };
 
 

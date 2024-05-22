@@ -15,6 +15,7 @@
 //
 //
 #include "IdleBehavior.h"
+#include "PerimeterDocking.h"
 
 extern void stopMoving();
 extern void stopBlade();
@@ -30,7 +31,6 @@ extern dynamic_reconfigure::Server<mower_logic::MowerLogicConfig> *reconfigServe
 
 extern ros::ServiceClient mapClient;
 extern ros::ServiceClient dockingPointClient;
-
 
 
 IdleBehavior IdleBehavior::INSTANCE;
@@ -69,14 +69,20 @@ Behavior *IdleBehavior::execute() {
         stopBlade();
         const auto last_config = getConfig();
         const auto last_status = getStatus();
-        if (manual_start_mowing ||
-            (last_config.automatic_start && (last_status.v_battery > last_config.battery_full_voltage && last_status.mow_esc_status.temperature_motor < last_config.motor_cold_temperature &&
-             !last_config.manual_pause_mowing))) {
+
+        const bool automatic_mode = last_config.automatic_mode == eAutoMode::AUTO;
+        const bool active_semiautomatic_task = last_config.automatic_mode == eAutoMode::SEMIAUTO && shared_state->active_semiautomatic_task && !shared_state->semiautomatic_task_paused;
+        const bool mower_ready = last_status.v_battery > last_config.battery_full_voltage && last_status.mow_esc_status.temperature_motor < last_config.motor_cold_temperature &&
+                !last_config.manual_pause_mowing;
+
+        if (manual_start_mowing || ((automatic_mode || active_semiautomatic_task) && mower_ready)) {
             // set the robot's position to the dock if we're actually docked
             if(last_status.v_charge > 5.0) {
-                ROS_INFO_STREAM("Currently inside the docking station, we set the robot's pose to the docks pose.");
-                setRobotPose(docking_pose_stamped.pose);
-                return &UndockingBehavior::INSTANCE;
+              if (PerimeterUndockingBehavior::configured(config))
+                return &PerimeterUndockingBehavior::INSTANCE;
+              ROS_INFO_STREAM("Currently inside the docking station, we set the robot's pose to the docks pose.");
+              setRobotPose(docking_pose_stamped.pose);
+              return &UndockingBehavior::INSTANCE;
             }
             // Not docked, so just mow
             setGPS(true);
@@ -136,6 +142,8 @@ void IdleBehavior::command_home() {
 }
 
 void IdleBehavior::command_start() {
+    // We got start, so we can reset the last manual pause
+    shared_state->semiautomatic_task_paused = false;
     manual_start_mowing = true;
 }
 
@@ -181,9 +189,9 @@ IdleBehavior::IdleBehavior() {
 void IdleBehavior::handle_action(std::string action) {
     if(action == "mower_logic:idle/start_mowing") {
         ROS_INFO_STREAM("Got start_mowing command");
-        manual_start_mowing = true;
+        command_start();
     } else if(action == "mower_logic:idle/start_area_recording") {
         ROS_INFO_STREAM("Got start_area_recording command");
-        start_area_recorder = true;
+        command_s1();
     }
 }

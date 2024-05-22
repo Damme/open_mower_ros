@@ -21,6 +21,21 @@
 #include "mower_logic/MowerLogicConfig.h"
 #include "mower_msgs/HighLevelStatus.h"
 #include <atomic>
+#include <memory>
+
+enum eAutoMode {
+    MANUAL = 0,
+    SEMIAUTO = 1,
+    AUTO = 2
+};
+
+struct sSharedState {
+    // True, if the semiautomatic task is still in progress
+    bool active_semiautomatic_task;
+    // True, if the user has manually paused the mowing. We should then wait for the user to continue
+    bool semiautomatic_task_paused;
+};
+
 /**
  * Behavior definition
  */
@@ -44,6 +59,7 @@ protected:
     }
 
     mower_logic::MowerLogicConfig config;
+    std::shared_ptr<sSharedState> shared_state;
 
     /**
      * Called ONCE on state enter.
@@ -88,7 +104,7 @@ public:
         requested_pause_flag = false;
     }
 
-    void start(mower_logic::MowerLogicConfig &c) {
+    void start(mower_logic::MowerLogicConfig &c, std::shared_ptr<sSharedState> s) {
         ROS_INFO_STREAM("");
         ROS_INFO_STREAM("");
         ROS_INFO_STREAM("--------------------------------------");
@@ -99,6 +115,7 @@ public:
         requested_continue_flag = false;
         requested_pause_flag = false;
         this->config = c;
+        this->shared_state = std::move(s);
         startTime = ros::Time::now();
         isGPSGood = false;
         sub_state = 0;
