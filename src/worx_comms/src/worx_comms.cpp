@@ -90,6 +90,7 @@ double wheel_distance_m = 0.0;
 
 int ros_msg_state = -1;
 std::string ros_msg_substate = "";
+std::string motorState = "";
 
 float v_battery = 0;
 float charge_current = 0;
@@ -223,13 +224,16 @@ uint8 SUBSTATE_3=2
 uint8 SUBSTATE_4=3
 uint8 SUBSTATE_SHIFT=6
     */
-   if (ros_msg_substate != msg->sub_state_name ) {
+    if (ros_msg_substate != msg->sub_state_name ) {
         ros_msg_substate = msg->sub_state_name;
         ROS_INFO("### rosSubStatusRecieved: %s", msg->sub_state_name.c_str());
-   }
-    if (ros_msg_state != msg->state ) {
+    }
+
+    bool motorStateCheck = (motorState == "MOTORREQ_IDLE" || motorState == "MOTORREQ_DISABLE") && msg->state > 1;
+
+    if (ros_msg_state != msg->state || motorStateCheck) {
         ros_msg_state = msg->state;
-        if (msg->state > 1) {
+        if (msg->state > 1 || motorStateCheck) {
             document.SetObject();
             setObject.SetObject();
             document.AddMember("MOTORREQ_ENABLE", setObject, *allocator);
@@ -262,22 +266,30 @@ void processI2C_IMU(const rapidjson::Value& i2c_imu) {
     sensor_imu_msg.header.stamp = ros::Time::now();
     sensor_imu_msg.header.seq++;
     sensor_imu_msg.header.frame_id = "base_link";
-    
+/*
+    sensor_mag_msg.header.stamp = ros::Time::now();
+    sensor_mag_msg.header.seq++;
+    sensor_mag_msg.header.frame_id = "base_link";
+    sensor_mag_msg.magnetic_field.x = 0.0001f;
+    sensor_mag_msg.magnetic_field.y = 0.0001f;
+    sensor_mag_msg.magnetic_field.z = 0.0001f;
+  */  
     if (i2c_imu.HasMember("Yaw"))
-        sensor_imu_msg.angular_velocity.x = i2c_imu["Yaw"].GetInt();
+        sensor_imu_msg.angular_velocity.x = i2c_imu["Yaw"].GetInt() / 100000.0f;
     if (i2c_imu.HasMember("Pitch"))
-        sensor_imu_msg.angular_velocity.y = i2c_imu["Pitch"].GetInt();
+        sensor_imu_msg.angular_velocity.y = i2c_imu["Pitch"].GetInt() / 100000.0f;
     if (i2c_imu.HasMember("Roll"))
-        sensor_imu_msg.angular_velocity.z = i2c_imu["Roll"].GetInt();
+        sensor_imu_msg.angular_velocity.z = i2c_imu["Roll"].GetInt() / 100000.0f;
     if (i2c_imu.HasMember("AccX"))
-        sensor_imu_msg.linear_acceleration.x = i2c_imu["AccX"].GetInt();
+        sensor_imu_msg.linear_acceleration.x = i2c_imu["AccX"].GetInt() / 1000.0f;
     if (i2c_imu.HasMember("AccY"))
-        sensor_imu_msg.linear_acceleration.y = i2c_imu["AccY"].GetInt();
+        sensor_imu_msg.linear_acceleration.y = i2c_imu["AccY"].GetInt() / 1000.0f;
     if (i2c_imu.HasMember("AccZ"))
-        sensor_imu_msg.linear_acceleration.z = i2c_imu["AccZ"].GetInt();
+        sensor_imu_msg.linear_acceleration.z = i2c_imu["AccZ"].GetInt() / 1000.0f;
 
  
     sensor_imu_pub.publish(sensor_imu_msg);
+    //sensor_mag_pub.publish(sensor_mag_msg);
 }
 
 void processMotorTicks(const rapidjson::Value& MotorPulse) {
@@ -594,7 +606,7 @@ int main(int argc, char **argv) {
             }
             if (document.HasMember("I2C_IMU")) {
                 //{"I2C_IMU":{"Yaw":-117,"Pitch":-316,"Roll":4,"AccX":63,"AccY":52,"AccZ":1034}}
-                //processI2C_IMU(document["I2C_IMU"]);
+                processI2C_IMU(document["I2C_IMU"]);
             }
             if (document.HasMember("MotorCurrent")) {
                 //{"MotorCurrent":{"Left":102,"Right":15,"MowRPM":0}}
@@ -613,6 +625,7 @@ int main(int argc, char **argv) {
                 ROS_INFO_STREAM("!!! " << rxMsg.c_str());
             }
             if (document.HasMember("motorState")) {
+                motorState = document["motorState"].GetString();
                 ROS_INFO_STREAM("!!! " << rxMsg.c_str());
             }
         }
