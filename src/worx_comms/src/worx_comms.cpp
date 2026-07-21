@@ -96,7 +96,7 @@ float v_battery = 0;
 float charge_current = 0;
 float battery_temp = 0;
 
-#define MAXSPEED 1320 // 2047 = 100% PWM, 1320 = 65% PWM
+#define MAXSPEED 1230 // 2047 = 100% PWM, 1320 = 65% PWM, 1230 = 60%
 
 void velReceived(const geometry_msgs::Twist::ConstPtr &msg) {
     last_cmd_vel = ros::Time::now();
@@ -177,7 +177,7 @@ void publishActuators() {
 
 bool setMowEnabled(mower_msgs::MowerControlSrvRequest &req, mower_msgs::MowerControlSrvResponse &res) {
     if (req.mow_enabled && !is_emergency()) {
-        speed_mow = 2047;
+        speed_mow = 1850;
     } else {
         speed_mow = 0;
     }
