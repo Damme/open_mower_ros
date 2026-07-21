@@ -1,0 +1,303 @@
+#include "ros/ros.h"
+#include "std_msgs/String.h"
+#include "sensor_msgs/Imu.h"
+#include "sensor_msgs/MagneticField.h"
+#include "tf2_ros/static_transform_broadcaster.h"
+#include "geometry_msgs/TransformStamped.h"
+#include <sstream>
+#include <cmath>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <linux/i2c.h>
+#include <linux/i2c-dev.h>
+
+#define MPU6050_ADDR 0x68
+#define HMC5883L_ADDR 0x1E
+
+#define ACCEL_CONFIG 0x1C // 28
+#define GYRO_CONFIG 0x1B // 27
+#define ACCEL_XOUT_H 0x3B
+#define ACCEL_YOUT_H 0x3D
+#define ACCEL_ZOUT_H 0x3F
+#define GYRO_XOUT_H 0x43
+#define GYRO_YOUT_H 0x45
+#define GYRO_ZOUT_H 0x47
+
+#define CONFIG_A 0x00
+#define CONFIG_B 0x01
+#define MODE_REG 0x02
+#define DATA_XOUT_H 0x03
+#define DATA_YOUT_H 0x05
+#define DATA_ZOUT_H 0x07
+
+#define ACCEL_SCALE_MODIFIER_2G 16384.0
+#define GYRO_SCALE_MODIFIER_500DEG 65.5
+#define MAG_SCALE_MODIFIER 1090.0
+
+#define GRAVITY 9.81686   // 9.80665
+
+static inline __s32 i2c_smbus_access(int file, char read_write, __u8 command, int size, union i2c_smbus_data *data)
+{
+    struct i2c_smbus_ioctl_data args;
+
+    args.read_write = read_write;
+    args.command = command;
+    args.size = size;
+    args.data = data;
+    return ioctl(file, I2C_SMBUS, &args);
+}
+
+static inline __s32 i2c_smbus_read_byte_data(int file, __u8 command)
+{
+    union i2c_smbus_data data;
+    if (i2c_smbus_access(file, I2C_SMBUS_READ, command, I2C_SMBUS_BYTE_DATA, &data))
+        return -1;
+    else
+        return 0x0FF & data.byte;
+}
+
+static inline __s32 i2c_smbus_write_byte_data(int file, __u8 command, uint8_t data_in)
+{
+    union i2c_smbus_data data;
+    data.byte = data_in;
+
+    if (i2c_smbus_access(file, I2C_SMBUS_WRITE, command, I2C_SMBUS_BYTE_DATA, &data))
+        return -1;
+    else
+        return 0x0FF & data.byte;
+}
+
+uint8_t i2c_read(int file, uint8_t dev_addr, uint8_t reg)
+{
+    int rc;
+    uint8_t read_back;
+
+    rc = ioctl(file, I2C_SLAVE, dev_addr); // Sets the device address
+    if (rc < 0)
+    {
+        ROS_INFO("ERROR - couldn't set device address");
+        return false;
+    }
+
+    // Actually perform the write and then read back immediately
+    read_back = i2c_smbus_read_byte_data(file, reg);
+    // ROS_INFO("read_back = 0x%x", read_back);
+
+    return read_back;
+}
+
+uint8_t i2c_write(int file, uint8_t dev_addr, uint8_t reg, uint8_t data_in)
+{
+    int rc;
+    uint8_t read_back;
+
+    rc = ioctl(file, I2C_SLAVE, dev_addr); // Sets the device address
+    if (rc < 0)
+    {
+        ROS_INFO("ERROR - couldn't set device address");
+        return false;
+    }
+
+    // Actually perform the write and then read back immediately
+    read_back = i2c_smbus_write_byte_data(file, reg, data_in);
+    // ROS_INFO("read_back = 0x%x", read_back);
+
+    return read_back;
+}
+
+int16_t read_word_2c(int file, uint8_t dev_addr, uint8_t reg)
+{
+    uint8_t high = i2c_read(file, dev_addr, reg);
+    uint8_t low = i2c_read(file, dev_addr, reg + 1);
+    int16_t value = (high << 8) + low;
+    if (value >= 0x8000)
+    {
+        value = -(65536 - value);
+    }
+    return value;
+}
+
+bool perform_self_test(int file)
+{
+    // Perform a simple read/write test to check if the sensors respond correctly
+    uint8_t original_value, test_value;
+
+    // Test MPU6050
+    original_value = i2c_read(file, MPU6050_ADDR, GYRO_CONFIG);
+    i2c_write(file, MPU6050_ADDR, GYRO_CONFIG, 0x08);
+    test_value = i2c_read(file, MPU6050_ADDR, GYRO_CONFIG);
+    if (test_value != 0x08)
+    {
+        ROS_INFO("MPU6050 self-test failed.");
+        return false;
+    }
+    i2c_write(file, MPU6050_ADDR, GYRO_CONFIG, original_value);
+
+    // Test HMC5883L
+/*    original_value = i2c_read(file, HMC5883L_ADDR, MODE_REG);
+    i2c_write(file, HMC5883L_ADDR, MODE_REG, 0x01);
+    test_value = i2c_read(file, HMC5883L_ADDR, MODE_REG);
+    if (test_value != 0x01)
+    {
+        ROS_INFO("HMC5883L self-test failed.");
+        return false;
+    }
+    i2c_write(file, HMC5883L_ADDR, MODE_REG, original_value);
+*/
+    ROS_INFO("Self-test passed.");
+    return true;
+}
+
+void calibrate_sensor(int file, int samples, double &accel_x_offset, double &accel_y_offset, double &accel_z_offset, double &gyro_x_offset, double &gyro_y_offset, double &gyro_z_offset)
+{
+    double accel_x_sum = 0, accel_y_sum = 0, accel_z_sum = 0;
+    double gyro_x_sum = 0, gyro_y_sum = 0, gyro_z_sum = 0;
+
+    for (int i = 0; i < samples; i++)
+    {
+        accel_x_sum += read_word_2c(file, MPU6050_ADDR, ACCEL_XOUT_H);
+        accel_y_sum += read_word_2c(file, MPU6050_ADDR, ACCEL_YOUT_H);
+        accel_z_sum += read_word_2c(file, MPU6050_ADDR, ACCEL_ZOUT_H);
+        gyro_x_sum += read_word_2c(file, MPU6050_ADDR, GYRO_XOUT_H);
+        gyro_y_sum += read_word_2c(file, MPU6050_ADDR, GYRO_YOUT_H);
+        gyro_z_sum += read_word_2c(file, MPU6050_ADDR, GYRO_ZOUT_H);
+
+        ros::Duration(0.01).sleep();
+    }
+
+    accel_x_offset = accel_x_sum / samples;
+    accel_y_offset = accel_y_sum / samples;
+    accel_z_offset = accel_z_sum / samples - ACCEL_SCALE_MODIFIER_2G; // Account for gravity
+    gyro_x_offset = gyro_x_sum / samples;
+    gyro_y_offset = gyro_y_sum / samples;
+    gyro_z_offset = gyro_z_sum / samples;
+}
+
+void publish_static_transform()
+{
+    static tf2_ros::StaticTransformBroadcaster static_broadcaster;
+    geometry_msgs::TransformStamped static_transform;
+
+    static_transform.header.stamp = ros::Time::now();
+    static_transform.header.frame_id = "base_link"; // Parent frame
+    static_transform.child_frame_id = "imu_frame"; // Child frame
+
+    static_transform.transform.translation.x = 0.0;
+    static_transform.transform.translation.y = 0.0;
+    static_transform.transform.translation.z = 0.0;
+    static_transform.transform.rotation.x = 0.0;
+    static_transform.transform.rotation.y = 0.0;
+    static_transform.transform.rotation.z = 0.0;
+    static_transform.transform.rotation.w = 1.0;
+
+    static_broadcaster.sendTransform(static_transform);
+}
+
+int main(int argc, char **argv)
+{
+    ros::init(argc, argv, "mpu6050_hmc5883l_node");
+    ros::NodeHandle nh;
+    ros::Publisher imu_pub = nh.advertise<sensor_msgs::Imu>("imu/data_raw", 1000);
+    ros::Publisher mag_pub = nh.advertise<sensor_msgs::MagneticField>("imu/mag", 1000);
+    ros::Rate loop_rate(25);
+
+    publish_static_transform(); // Call the function here
+
+    int file = open("/dev/i2c-1", O_RDWR);
+    if (file < 0)
+    {
+        ROS_ERROR("Failed to open the i2c bus.");
+        return -1;
+    }
+
+    // Initialize MPU6050
+    i2c_write(file, MPU6050_ADDR, 0x6B, 0x08); // Reset MPU6050
+    if (!perform_self_test(file))
+    {
+        ROS_ERROR("Self-test failed. Exiting...");
+        close(file);
+        return -1;
+    }
+
+
+    i2c_write(file, MPU6050_ADDR, ACCEL_CONFIG, 0x00); // ±2g
+
+//    printf("accel %i\r\n", i2c_read(file, MPU6050_ADDR, GYRO_CONFIG));
+    i2c_write(file, MPU6050_ADDR, GYRO_CONFIG, 0x08);  // 1000°/s
+//    printf("accel %i\r\n", i2c_read(file, MPU6050_ADDR, GYRO_CONFIG));
+
+    // Initialize HMC5883L
+    i2c_write(file, HMC5883L_ADDR, CONFIG_A, 0x70); // 8-average, 15 Hz default, normal measurement
+    i2c_write(file, HMC5883L_ADDR, CONFIG_B, 0xA0); // Gain=5
+    i2c_write(file, HMC5883L_ADDR, MODE_REG, 0x00); // Continuous measurement mode
+
+    // Calibration
+    double accel_x_offset, accel_y_offset, accel_z_offset;
+    double gyro_x_offset, gyro_y_offset, gyro_z_offset;
+    ROS_INFO("Calibrating... Please keep the sensor stationary.");
+    calibrate_sensor(file, 1000, accel_x_offset, accel_y_offset, accel_z_offset, gyro_x_offset, gyro_y_offset, gyro_z_offset);
+    ROS_INFO("Calibration complete.");
+
+    while (ros::ok())
+    {
+        // Read MPU6050 data
+        int16_t accel_x_raw = read_word_2c(file, MPU6050_ADDR, ACCEL_XOUT_H);
+        int16_t accel_y_raw = read_word_2c(file, MPU6050_ADDR, ACCEL_YOUT_H);
+        int16_t accel_z_raw = read_word_2c(file, MPU6050_ADDR, ACCEL_ZOUT_H);
+        int16_t gyro_x_raw = read_word_2c(file, MPU6050_ADDR, GYRO_XOUT_H);
+        int16_t gyro_y_raw = read_word_2c(file, MPU6050_ADDR, GYRO_YOUT_H);
+        int16_t gyro_z_raw = read_word_2c(file, MPU6050_ADDR, GYRO_ZOUT_H);
+
+        // Convert raw values to acceleration in m/s² and angular velocity in rad/s
+        double accel_x = ((accel_x_raw - accel_x_offset) / ACCEL_SCALE_MODIFIER_2G) * GRAVITY;
+        double accel_y = ((accel_y_raw - accel_y_offset) / ACCEL_SCALE_MODIFIER_2G) * GRAVITY;
+        double accel_z = ((accel_z_raw - accel_z_offset) / ACCEL_SCALE_MODIFIER_2G) * GRAVITY;
+        double gyro_x = ((gyro_x_raw - gyro_x_offset) / GYRO_SCALE_MODIFIER_500DEG) * (M_PI / 180.0);
+        double gyro_y = ((gyro_y_raw - gyro_y_offset) / GYRO_SCALE_MODIFIER_500DEG) * (M_PI / 180.0);
+        double gyro_z = ((gyro_z_raw - gyro_z_offset) / GYRO_SCALE_MODIFIER_500DEG) * (M_PI / 180.0);
+/*
+        // Read HMC5883L data
+        int16_t mag_x_raw = read_word_2c(file, HMC5883L_ADDR, DATA_XOUT_H);
+        int16_t mag_y_raw = read_word_2c(file, HMC5883L_ADDR, DATA_YOUT_H);
+        int16_t mag_z_raw = read_word_2c(file, HMC5883L_ADDR, DATA_ZOUT_H);
+
+        // Convert raw values to magnetic field in gauss
+        double mag_x = mag_x_raw / MAG_SCALE_MODIFIER;
+        double mag_y = mag_y_raw / MAG_SCALE_MODIFIER;
+        double mag_z = mag_z_raw / MAG_SCALE_MODIFIER;
+*/
+        // Prepare IMU message
+        sensor_msgs::Imu imu_msg;
+        imu_msg.header.stamp = ros::Time::now();
+        imu_msg.header.frame_id = "imu_frame";
+
+        imu_msg.linear_acceleration.x = accel_x;
+        imu_msg.linear_acceleration.y = accel_y;
+        imu_msg.linear_acceleration.z = accel_z;
+
+        imu_msg.angular_velocity.x = gyro_x;
+        imu_msg.angular_velocity.y = gyro_y;
+        imu_msg.angular_velocity.z = gyro_z;
+
+        imu_pub.publish(imu_msg);
+/*
+        // Prepare MagneticField message
+        sensor_msgs::MagneticField mag_msg;
+//        mag_msg.header.stamp = ros::Time::now();
+        mag_msg.header.stamp = imu_msg.header.stamp;
+        mag_msg.header.frame_id = "imu_frame";
+
+        mag_msg.magnetic_field.x = mag_x;
+        mag_msg.magnetic_field.y = mag_y;
+        mag_msg.magnetic_field.z = mag_z;
+
+        mag_pub.publish(mag_msg);
+*/
+        ros::spinOnce();
+        loop_rate.sleep();
+    }
+
+    close(file);
+    return 0;
+}
