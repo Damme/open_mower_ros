@@ -1,1 +1,4 @@
-serial_port: "/dev/ttyS0"
+#serial_port: "/tmp/socatpty1"
+device_type: "tcp"
+tcp_host: "127.0.0.1"
+tcp_port: "5015"
