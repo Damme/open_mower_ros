@@ -60,3 +60,16 @@ CATKIN_IGNORE
 cmake-build-debug/
 .vscode
 
+# Local scratch / working files (not part of the project)
+/99-make-rsync-etc-etc.txt
+/MISSING_PACKAGES_LIST
+/frames.gv
+/frames.pdf
+/pigpio.h
+/special.txt
+/src/open_mower/params/ftc_local_planner.yaml-test
+
+# Compiled artifacts and scratch dirs pulled in with vendored packages
+src/mpu9255-new/offsetIMU
+src/lib/coverage_planner/temp/
+
