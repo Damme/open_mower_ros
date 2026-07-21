@@ -32,6 +32,9 @@ ExternalProject_Add(
         INSTALL_COMMAND cmake -E echo "Skipping install step."
 
         CMAKE_CACHE_ARGS
+        CMAKE_ARGS -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
+               -DCMAKE_EXE_LINKER_FLAGS:STRING=--sysroot=${CMAKE_SYSROOT}\;-L${CMAKE_SYSROOT}/opt/ros/noetic/lib\;-L${CMAKE_SYSROOT}/usr/lib/aarch64-linux-gnu
+               -DCMAKE_SHARED_LINKER_FLAGS:STRING=--sysroot=${CMAKE_SYSROOT}\;-L${CMAKE_SYSROOT}/opt/ros/noetic/lib\;-L${CMAKE_SYSROOT}/usr/lib/aarch64-linux-gnu
         #SOURCE_SUBDIR src
         BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR>
         # --config Release
