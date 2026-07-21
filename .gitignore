@@ -73,3 +73,7 @@ cmake-build-debug/
 src/mpu9255-new/offsetIMU
 src/lib/coverage_planner/temp/
 
+
+# Scratch/backup kept inside absorbed (formerly submodule) packages
+/src/lib/ftc_local_planner/src/test.cpp
+/src/lib/slic3r_coverage_planner/Original/
