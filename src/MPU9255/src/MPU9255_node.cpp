@@ -31,6 +31,8 @@ int main(int argc, char **argv){
    fe = wiringPiI2CSetup(0x0C); //Start the compass
    wiringPiI2CWriteReg8(fe, 0x0A, 0x01); //Trigger first Mag reading
 
+  ros::Rate loop_rate(25);
+
   while (ros::ok()){
     //http://docs.ros.org/api/sensor_msgs/html/msg/Imu.html
     //http://docs.ros.org/api/sensor_msgs/html/msg/MagneticField.html
@@ -60,8 +62,10 @@ int main(int argc, char **argv){
 
     data_imu.angular_velocity.x = InBuffer[3]*conversion_gyro;
     data_imu.angular_velocity.y = InBuffer[4]*conversion_gyro;
+    data_imu.angular_velocity.z = InBuffer[5]*conversion_gyro;
+
     // wierd offset for the z axis, dont know why.
-    data_imu.angular_velocity.z = (InBuffer[5] * conversion_gyro) * -0.250252f;
+    //data_imu.angular_velocity.z = (InBuffer[5] * conversion_gyro) * -0.250252f;
 
     //datos magnetómetro
 
@@ -87,6 +91,8 @@ int main(int argc, char **argv){
     pub_mag.publish(data_mag);
 
     ros::spinOnce();
+    loop_rate.sleep();
+
     }
   return 0;
  }
