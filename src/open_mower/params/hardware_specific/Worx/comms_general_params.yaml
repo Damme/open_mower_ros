@@ -1,1 +1,1 @@
-ll_spi_dev_name: "/dev/spidev1.0"
+ll_spi_dev_name: "/dev/spidev0.0"
