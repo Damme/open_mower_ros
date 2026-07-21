@@ -259,6 +259,140 @@ void printNavState(int state)
     }
 }
 
+// ---------------------------------------------------------------------------
+//  Event-driven goal handshaking (replaces fixed sleep() hacks)
+//
+//  The old code sent a goal then slept a fixed time before reading getState(),
+//  and on skip/abort/pause called cancelAllGoals() and immediately looped to
+//  send the next goal. On slow hardware (Pi Zero) MBF had not finished
+//  registering / tearing down the previous goal yet, so the next operation hit
+//  a half-built / half-destroyed handle -> "getElem() should not see invalid
+//  handles" and move_base_flex died. See move_base_flex issue #93 (thread-unsafe
+//  cancel & restart in the same concurrency slot).
+//
+//  The fix is to wait for the ACTUAL action-client state transitions instead of
+//  guessing with a sleep. This is CPU-speed independent: it waits exactly as
+//  long as the transition takes, no more, no less.
+// ---------------------------------------------------------------------------
+
+// Wait until the action server is connected. Returns false if it never comes up
+// within the timeout (caller should treat as failure rather than charging ahead).
+template <typename ActionClientT>
+static bool ensureServerReady(ActionClientT *client, const char *which,
+                              double timeout_s = 10.0)
+{
+    if (client->isServerConnected())
+        return true;
+    ROS_INFO_STREAM("MowingBehavior: waiting for " << which << " action server...");
+    if (!client->waitForServer(ros::Duration(timeout_s))) {
+        ROS_ERROR_STREAM("MowingBehavior: " << which << " action server not available after "
+                                            << timeout_s << "s.");
+        return false;
+    }
+    return true;
+}
+
+// Cancel all goals on a client and BLOCK until the active goal actually reaches
+// a terminal state, so the concurrency slot is fully drained before any new
+// goal is sent. This is the direct replacement for "cancel then hope a sleep is
+// long enough". Returns true if the goal terminated (or there was nothing to
+// cancel) within the timeout.
+template <typename ActionClientT>
+static bool cancelAndDrain(ActionClientT *client, const char *which,
+                           double timeout_s = 5.0)
+{
+    actionlib::SimpleClientGoalState st = client->getState();
+    // If there is no in-flight goal, nothing to drain.
+    if (st.isDone())
+        return true;
+    client->cancelAllGoals();
+    // Wait for the goal handle to reach a terminal state. waitForResult returns
+    // true once the goal is done; on timeout we log but do not spin forever.
+    if (!client->waitForResult(ros::Duration(timeout_s))) {
+        ROS_WARN_STREAM("MowingBehavior: " << which
+                        << " did not reach a terminal state within " << timeout_s
+                        << "s after cancel; proceeding cautiously.");
+        return false;
+    }
+    return true;
+}
+
+// Send a goal and BLOCK until the client confirms the goal has left the initial
+// transient (i.e. the server has acknowledged it: state is ACTIVE, or already
+// terminal). This replaces "sendGoal(); sleep(3);" - we proceed the instant the
+// handle is valid and acknowledged, instead of after a fixed guess.
+template <typename ActionClientT, typename GoalT>
+static void sendGoalAndConfirm(ActionClientT *client, const GoalT &goal,
+                               const char *which, double ack_timeout_s = 5.0)
+{
+    client->sendGoal(goal);
+    if (ack_timeout_s <= 0.0)
+        return;  // caller does not want to block for acknowledgement
+    ros::Time start = ros::Time::now();
+    ros::Rate r(50);  // 20 ms poll; transitions are usually a few cycles
+    // Hard iteration cap as a backstop in case the clock does not advance
+    // (e.g. /use_sim_time with a stalled clock) so we can never spin forever.
+    const int max_iters = static_cast<int>((ack_timeout_s + 1.0) * 50.0) + 10;
+    int iters = 0;
+    while (ros::ok()) {
+        actionlib::SimpleClientGoalState st = client->getState();
+        // ACTIVE = server accepted and is working it; any terminal state also
+        // means the handle is fully registered and safe to inspect.
+        if (st.state_ != actionlib::SimpleClientGoalState::PENDING)
+            break;
+        if ((ros::Time::now() - start).toSec() > ack_timeout_s ||
+            ++iters > max_iters) {
+            ROS_WARN_STREAM("MowingBehavior: " << which
+                            << " goal still PENDING after " << ack_timeout_s
+                            << "s (server slow to acknowledge); proceeding.");
+            break;
+        }
+        r.sleep();
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  MBF crash survival (respawn + resume)
+//
+//  The "getElem() should not see invalid handles" segfault is an upstream
+//  class_loader thread-safety bug inside move_base_flex: its move_base action
+//  engages the global planner the instant it gets a goal, which races the
+//  controller teardown of the just-finished exe_path goal -- inside MBF, on its
+//  own threads. Two timing-based attempts on our side did not stop it (same log),
+//  because we cannot serialize threads in another process.
+//
+//  So we survive it instead of preventing it: the launch now respawns MBF
+//  (respawn=true, not required=true), and the wait loops below detect the death
+//  (server disconnected / goal LOST), wait for MBF to come back, and re-send the
+//  current goal from the current progress. A crash becomes a ~5 s hiccup, not a
+//  dead robot. MBF_HANDOVER_SETTLE is kept as defense-in-depth to make crashes
+//  rarer, but correctness no longer depends on it.
+// ---------------------------------------------------------------------------
+static const double MBF_HANDOVER_SETTLE = 1.0;   // s; teardown gap before engaging move_base
+static const int    MBF_MAX_RECOVERIES  = 10;    // respawn recoveries per segment before giving up
+
+// Did MBF vanish under us? (segfault -> roslaunch respawn in progress)
+template <typename ClientT>
+static bool mbfDied(ClientT *client, const actionlib::SimpleClientGoalState &st) {
+    return st.state_ == actionlib::SimpleClientGoalState::LOST || !client->isServerConnected();
+}
+
+// Block until MBF's action server is back after a respawn. Returns false if it
+// never returns within the timeout.
+template <typename ClientT>
+static bool waitForMbfRespawn(ClientT *client, const char *which, double timeout_s = 120.0) {
+    ROS_ERROR_STREAM("MowingBehavior: " << which
+                     << " server lost -- move_base_flex crashed. Waiting for respawn...");
+    ros::Duration(2.0).sleep();                       // let roslaunch relaunch the node
+    if (!client->waitForServer(ros::Duration(timeout_s))) {
+        ROS_ERROR_STREAM("MowingBehavior: " << which << " did not return within " << timeout_s << "s.");
+        return false;
+    }
+    ros::Duration(3.0).sleep();                        // let the costmaps repopulate from the map
+    ROS_WARN_STREAM("MowingBehavior: " << which << " is back -- resuming.");
+    return true;
+}
+
 bool MowingBehavior::execute_mowing_plan() {
 
     int first_point_attempt_counter = 0;
@@ -304,7 +438,7 @@ bool MowingBehavior::execute_mowing_plan() {
         ROS_INFO_STREAM("MowingBehavior: Path segment length: " << path.path.poses.size() << " poses.");
 
         // Check if path is empty. If so, directly skip it
-        if(path.path.poses.size() - currentMowingPathIndex <= 0) {
+        if(currentMowingPathIndex >= path.path.poses.size()) {
             ROS_INFO_STREAM("MowingBehavior: Skipping empty path.");
             currentMowingPath++;
             currentMowingPathIndex = 0;
@@ -324,20 +458,42 @@ bool MowingBehavior::execute_mowing_plan() {
                 mower_map::SetNavPointSrv set_nav_point_srv;
                 set_nav_point_srv.request.nav_pose = path.path.poses[currentMowingPathIndex].pose;
                 setNavPointClient.call(set_nav_point_srv);
-                sleep(1);
+                sleep(3);
             }
 
             mbf_msgs::MoveBaseGoal moveBaseGoal;
             moveBaseGoal.target_pose = path.path.poses[currentMowingPathIndex];
             moveBaseGoal.controller = "FTCPlanner";
-            mbfClient->sendGoal(moveBaseGoal);
-            sleep(1);
+            // Make sure the server is up and, cross-client, that the exe_path
+            // controller from the just-finished mow is fully released before
+            // move_base engages the global planner. (Defense in depth; the real
+            // safety net is the crash recovery in the wait loop below.)
+            ensureServerReady(mbfClient, "move_base", 60.0);
+            cancelAndDrain(mbfClientExePath, "exe_path");
+            ros::Duration(MBF_HANDOVER_SETTLE).sleep();
+            sendGoalAndConfirm(mbfClient, moveBaseGoal, "move_base (first point)");
             actionlib::SimpleClientGoalState current_status(actionlib::SimpleClientGoalState::PENDING);
             ros::Rate r(10);
+            int mbf_recoveries = 0;
 
             // wait for path execution to finish
             while (ros::ok()) {
                 current_status = mbfClient->getState();
+
+                // --- survive an MBF crash: wait for respawn and re-send the goal ---
+                if (mbfDied(mbfClient, current_status)) {
+                    if (mbf_recoveries++ >= MBF_MAX_RECOVERIES ||
+                        !waitForMbfRespawn(mbfClient, "move_base")) {
+                        ROS_ERROR_STREAM("MowingBehavior: (FIRST POINT) giving up after MBF crash.");
+                        break;   // fall through to the normal "could not reach goal" handling
+                    }
+                    cancelAndDrain(mbfClientExePath, "exe_path");
+                    ros::Duration(MBF_HANDOVER_SETTLE).sleep();
+                    mbfClient->sendGoal(moveBaseGoal);
+                    current_status = actionlib::SimpleClientGoalState(actionlib::SimpleClientGoalState::PENDING);
+                    r.sleep();
+                    continue;
+                }
                 if (current_status.state_ == actionlib::SimpleClientGoalState::ACTIVE ||
                     current_status.state_ == actionlib::SimpleClientGoalState::PENDING) {
                     // path is being executed, everything seems fine.
@@ -346,26 +502,31 @@ bool MowingBehavior::execute_mowing_plan() {
                         ROS_INFO_STREAM("MowingBehavior: (FIRST POINT) SKIP AREA was requested.");
                         // remove all paths in current area and return true
                         mowerEnabled = false;
-                        mbfClientExePath->cancelAllGoals();
+                        cancelAndDrain(mbfClient, "move_base");
+                        cancelAndDrain(mbfClientExePath, "exe_path");
                         currentMowingPaths.clear();
                         skip_area = false;
                         return true;
                     }
                     if(skip_path) {
                         skip_path= false;
+                        cancelAndDrain(mbfClient, "move_base");
+                        cancelAndDrain(mbfClientExePath, "exe_path");
                         currentMowingPath++;
                         currentMowingPathIndex = 0;
                         return false;
                     }
                     if (aborted) {
                         ROS_INFO_STREAM("MowingBehavior: (FIRST POINT) ABORT was requested - stopping path execution.");
-                        mbfClientExePath->cancelAllGoals();
+                        cancelAndDrain(mbfClient, "move_base");
+                        cancelAndDrain(mbfClientExePath, "exe_path");
                         mowerEnabled = false;
                         return false;
                     }
                     if (requested_pause_flag) {
                         ROS_INFO_STREAM("MowingBehavior: (FIRST POINT) PAUSE was requested - stopping path execution.");
-                        mbfClientExePath->cancelAllGoals();
+                        cancelAndDrain(mbfClient, "move_base");
+                        cancelAndDrain(mbfClientExePath, "exe_path");
                         mowerEnabled = false;
                         return false;
                     }
@@ -441,14 +602,36 @@ bool MowingBehavior::execute_mowing_plan() {
             exePathGoal.controller = "FTCPlanner";
 
             ROS_INFO_STREAM("MowingBehavior: (MOW) First point reached - Executing mow path with " << path.path.poses.size() << " poses, from index " << exePathStartIndex);
-            mbfClientExePath->sendGoal(exePathGoal);
-            sleep(1);
+            ensureServerReady(mbfClientExePath, "exe_path", 60.0);
+            cancelAndDrain(mbfClientExePath, "exe_path");
+            sendGoalAndConfirm(mbfClientExePath, exePathGoal, "exe_path (mow)");
             actionlib::SimpleClientGoalState current_status(actionlib::SimpleClientGoalState::PENDING);
             ros::Rate r(10);
+            int mbf_recoveries = 0;
 
             // wait for path execution to finish
             while (ros::ok()) {
                 current_status = mbfClientExePath->getState();
+
+                // --- survive an MBF crash: wait for respawn and resume from progress ---
+                if (mbfDied(mbfClientExePath, current_status)) {
+                    if (mbf_recoveries++ >= MBF_MAX_RECOVERIES ||
+                        !waitForMbfRespawn(mbfClientExePath, "exe_path")) {
+                        ROS_ERROR_STREAM("MowingBehavior: (MOW) giving up after MBF crash.");
+                        break;
+                    }
+                    // resume: re-send only the not-yet-mown remainder of the path
+                    nav_msgs::Path resumePath;
+                    resumePath.header = path.path.header;
+                    resumePath.poses = std::vector<geometry_msgs::PoseStamped>(
+                        path.path.poses.begin() + currentMowingPathIndex, path.path.poses.end());
+                    exePathGoal.path = resumePath;
+                    exePathStartIndex = currentMowingPathIndex;
+                    mbfClientExePath->sendGoal(exePathGoal);
+                    current_status = actionlib::SimpleClientGoalState(actionlib::SimpleClientGoalState::PENDING);
+                    r.sleep();
+                    continue;
+                }
                 if (current_status.state_ == actionlib::SimpleClientGoalState::ACTIVE ||
                     current_status.state_ == actionlib::SimpleClientGoalState::PENDING) {
                     // path is being executed, everything seems fine.
@@ -457,25 +640,27 @@ bool MowingBehavior::execute_mowing_plan() {
                         ROS_INFO_STREAM("MowingBehavior: (MOW) SKIP AREA was requested.");
                         // remove all paths in current area and return true
                         mowerEnabled = false;
+                        cancelAndDrain(mbfClientExePath, "exe_path");
                         currentMowingPaths.clear();
                         skip_area = false;
                         return true;
                     }
                     if(skip_path) {
                         skip_path= false;
+                        cancelAndDrain(mbfClientExePath, "exe_path");
                         currentMowingPath++;
                         currentMowingPathIndex = 0;
                         return false;
                     }
                     if (aborted) {
                         ROS_INFO_STREAM("MowingBehavior: (MOW) ABORT was requested - stopping path execution.");
-                        mbfClientExePath->cancelAllGoals();
+                        cancelAndDrain(mbfClientExePath, "exe_path");
                         mowerEnabled = false;
                         break; // Trim path
                     }
                     if (requested_pause_flag) {
                         ROS_INFO_STREAM("MowingBehavior: (MOW) PAUSE was requested - stopping path execution.");
-                        mbfClientExePath->cancelAllGoals();
+                        cancelAndDrain(mbfClientExePath, "exe_path");
                         mowerEnabled = false;
                         break; // Trim path
                     }
