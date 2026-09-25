@@ -1,12 +1,19 @@
 <launch>
-#    <include file="$(find open_mower)/launch/include/imu.launch"/>
+    <!-- Old IMU stack (mpu9255 + complementary filter); the LSM6DSV node below replaces it.
+         Note: a leading "#" does NOT comment out a line in launch XML.
+    <include file="$(find open_mower)/launch/include/imu.launch"/>
+    -->
     <include file="$(find open_mower)/launch/include/_comms.launch"/>
     <include file="$(find open_mower)/launch/include/_move_base.launch"/>
     <include file="$(find open_mower)/launch/include/_localization.launch"/>
+    <!-- Gamepad teleop (joy_node + joy_teleop.py, ~40 MB RAM) disabled: no gamepad in use.
     <include file="$(find open_mower)/launch/include/_teleop.launch"/>
+    -->
     <include file="$(find open_mower)/launch/include/_record.launch">
         <arg name="prefix" value="mow_area"/>
     </include>
+    
+    <node pkg="lsm6dsv_imu" type="lsm6dsv_imu_node" name="lsm6dsv_imu" output="screen"/>
 
     <node pkg="mower_map" type="mower_map_service" name="map_service" output="screen"/>
     <node pkg="mower_logic" type="mower_logic" name="mower_logic" output="screen">
