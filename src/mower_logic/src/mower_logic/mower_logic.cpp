@@ -374,9 +374,9 @@ void checkSafety(const ros::TimerEvent &timer_event) {
     const auto status_time = getStatusTime();
     const auto last_good_gps = getLastGoodGPS();
 
-
-    // call the mower
-    setMowerEnabled(currentBehavior != nullptr && currentBehavior->mower_enabled());
+    // The blade is enabled further down, only after the pose and GPS checks passed.
+    // Enabling it here and then calling stopBlade() in those checks toggled the blade
+    // on/off every 0.5 s cycle while the pose was stale or the GPS had timed out.
 
     high_level_status.emergency = last_status.emergency;
     high_level_status.is_charging = last_status.v_charge > 10.0;
@@ -445,13 +445,20 @@ void checkSafety(const ros::TimerEvent &timer_event) {
         ROS_WARN_STREAM_THROTTLE(1,"GPS timeout");
     }
 
+    bool gpsBlocksBlade = false;
     if (currentBehavior != nullptr && currentBehavior->needs_gps()) {
         // Stop the mower
         if(gpsTimeout) {
             stopBlade();
             stopMoving();
+            gpsBlocksBlade = true;
         }
         currentBehavior->setGoodGPS(!gpsTimeout);
+    }
+
+    // call the mower
+    if (!gpsBlocksBlade) {
+        setMowerEnabled(currentBehavior != nullptr && currentBehavior->mower_enabled());
     }
 
     double battery_percent = (last_status.v_battery - last_config.battery_empty_voltage) / (last_config.battery_full_voltage - last_config.battery_empty_voltage);

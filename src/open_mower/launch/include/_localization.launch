@@ -7,6 +7,8 @@
             <remap from="~xb_pose_in" to="xbot_driver_gps/xb_pose"/>
             <remap from="~xb_pose_out" to="xbot_positioning/xb_pose"/>
             <param name="max_gps_accuracy" value="0.2"/>
+            <!-- seconds without an accepted RTK fix before the pose is reported as not GPS-backed -->
+            <param name="recent_gps_timeout" value="$(optenv OM_GPS_RECENT_TIMEOUT_SEC 1.5)"/>
             <param name="antenna_offset_x" value="$(env OM_ANTENNA_OFFSET_X)"/>
             <param name="antenna_offset_y" value="$(env OM_ANTENNA_OFFSET_Y)"/>
         </node>

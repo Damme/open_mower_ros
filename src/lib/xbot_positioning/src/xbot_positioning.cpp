@@ -150,6 +150,10 @@ double min_speed = 0.0;
 // Max position accuracy to allow for GPS updates
 double max_gps_accuracy;
 
+// Seconds without an accepted GPS fix before the pose stops being flagged as
+// GPS-backed (FLAG_SENSOR_FUSION_RECENT_ABSOLUTE_POSE) -- i.e. the RTK-loss reaction time.
+double recent_gps_timeout;
+
 // True, if we should publish debug topics (expected motion vector and kalman state)
 bool publish_debug;
 
@@ -341,15 +345,17 @@ void onImu(const sensor_msgs::Imu::ConstPtr &msg) {
     // TODO: send motion vector
     xb_absolute_pose_msg.motion_vector_valid = false;
     // TODO: set real value from kalman filter, not the one from the GPS.
-    if(has_gps) {
+    // A fix only counts as recent while it is being ACCEPTED (RTK fixed, accurate,
+    // inlier). Rejected fixes never update last_gps_time, so on RTK loss the flag
+    // drops after recent_gps_timeout and mower_logic reacts. This used to be a
+    // hard-coded 10 s, during which the stale accuracy of the last good fix was
+    // reported and the mower kept mowing on dead reckoning.
+    const bool gps_recent = has_gps &&
+        (ros::Time::now() - last_gps_time).toSec() < recent_gps_timeout;
+    if(gps_recent) {
+        xb_absolute_pose_msg.flags |= xbot_msgs::AbsolutePose::FLAG_SENSOR_FUSION_RECENT_ABSOLUTE_POSE;
         xb_absolute_pose_msg.position_accuracy = last_gps.position_accuracy;
     } else {
-        xb_absolute_pose_msg.position_accuracy = 999;
-    }
-    if((ros::Time::now() - last_gps_time).toSec() < 10.0) {
-        xb_absolute_pose_msg.flags |= xbot_msgs::AbsolutePose::FLAG_SENSOR_FUSION_RECENT_ABSOLUTE_POSE;
-    } else {
-        // on GPS timeout, we set accuracy to 0.
         xb_absolute_pose_msg.position_accuracy = 999;
     }
     // TODO: set real value
@@ -664,6 +670,7 @@ int main(int argc, char **argv) {
     paramNh.param("gyro_offset", gyro_offset, 0.0);
     paramNh.param("min_speed", min_speed, 0.01);
     paramNh.param("max_gps_accuracy", max_gps_accuracy, 0.1);
+    paramNh.param("recent_gps_timeout", recent_gps_timeout, 1.5);
     paramNh.param("debug", publish_debug, false);
     paramNh.param("antenna_offset_x", antenna_offset_x, 0.0);
     paramNh.param("antenna_offset_y", antenna_offset_y, 0.0);

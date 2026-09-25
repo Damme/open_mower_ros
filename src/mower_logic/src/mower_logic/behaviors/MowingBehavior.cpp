@@ -351,48 +351,6 @@ static void sendGoalAndConfirm(ActionClientT *client, const GoalT &goal,
     }
 }
 
-// ---------------------------------------------------------------------------
-//  MBF crash survival (respawn + resume)
-//
-//  The "getElem() should not see invalid handles" segfault is an upstream
-//  class_loader thread-safety bug inside move_base_flex: its move_base action
-//  engages the global planner the instant it gets a goal, which races the
-//  controller teardown of the just-finished exe_path goal -- inside MBF, on its
-//  own threads. Two timing-based attempts on our side did not stop it (same log),
-//  because we cannot serialize threads in another process.
-//
-//  So we survive it instead of preventing it: the launch now respawns MBF
-//  (respawn=true, not required=true), and the wait loops below detect the death
-//  (server disconnected / goal LOST), wait for MBF to come back, and re-send the
-//  current goal from the current progress. A crash becomes a ~5 s hiccup, not a
-//  dead robot. MBF_HANDOVER_SETTLE is kept as defense-in-depth to make crashes
-//  rarer, but correctness no longer depends on it.
-// ---------------------------------------------------------------------------
-static const double MBF_HANDOVER_SETTLE = 1.0;   // s; teardown gap before engaging move_base
-static const int    MBF_MAX_RECOVERIES  = 10;    // respawn recoveries per segment before giving up
-
-// Did MBF vanish under us? (segfault -> roslaunch respawn in progress)
-template <typename ClientT>
-static bool mbfDied(ClientT *client, const actionlib::SimpleClientGoalState &st) {
-    return st.state_ == actionlib::SimpleClientGoalState::LOST || !client->isServerConnected();
-}
-
-// Block until MBF's action server is back after a respawn. Returns false if it
-// never returns within the timeout.
-template <typename ClientT>
-static bool waitForMbfRespawn(ClientT *client, const char *which, double timeout_s = 120.0) {
-    ROS_ERROR_STREAM("MowingBehavior: " << which
-                     << " server lost -- move_base_flex crashed. Waiting for respawn...");
-    ros::Duration(2.0).sleep();                       // let roslaunch relaunch the node
-    if (!client->waitForServer(ros::Duration(timeout_s))) {
-        ROS_ERROR_STREAM("MowingBehavior: " << which << " did not return within " << timeout_s << "s.");
-        return false;
-    }
-    ros::Duration(3.0).sleep();                        // let the costmaps repopulate from the map
-    ROS_WARN_STREAM("MowingBehavior: " << which << " is back -- resuming.");
-    return true;
-}
-
 bool MowingBehavior::execute_mowing_plan() {
 
     int first_point_attempt_counter = 0;
@@ -421,11 +379,19 @@ bool MowingBehavior::execute_mowing_plan() {
         {   
             paused_time = ros::Time::now();
             mowerEnabled = false;
-            while (!this->hasGoodGPS()) // while no good GPS we wait
+            bool waited_for_gps = false;
+            while (!this->hasGoodGPS() && !aborted) // while no good GPS we wait
             {
+                waited_for_gps = true;
                 ROS_INFO_STREAM("MowingBehavior: PAUSED (" << (ros::Time::now()-paused_time).toSec() << "s) (waiting for /odom)");
                 ros::Rate r(1.0);
                 r.sleep();
+            }
+            if (aborted) break;
+            if (waited_for_gps && config.gps_wait_time > 0.0) {
+                // GPS is back: let the filter settle before driving (OM_GPS_WAIT_TIME_SEC)
+                ROS_INFO_STREAM("MowingBehavior: GPS back, waiting " << config.gps_wait_time << "s for the filter to settle");
+                ros::Duration(config.gps_wait_time).sleep();
             }
             ROS_INFO_STREAM("MowingBehavior: CONTINUING");
             this->setContinue();
@@ -464,36 +430,17 @@ bool MowingBehavior::execute_mowing_plan() {
             mbf_msgs::MoveBaseGoal moveBaseGoal;
             moveBaseGoal.target_pose = path.path.poses[currentMowingPathIndex];
             moveBaseGoal.controller = "FTCPlanner";
-            // Make sure the server is up and, cross-client, that the exe_path
-            // controller from the just-finished mow is fully released before
-            // move_base engages the global planner. (Defense in depth; the real
-            // safety net is the crash recovery in the wait loop below.)
             ensureServerReady(mbfClient, "move_base", 60.0);
             cancelAndDrain(mbfClientExePath, "exe_path");
-            ros::Duration(MBF_HANDOVER_SETTLE).sleep();
             sendGoalAndConfirm(mbfClient, moveBaseGoal, "move_base (first point)");
             actionlib::SimpleClientGoalState current_status(actionlib::SimpleClientGoalState::PENDING);
+            bool gps_lost = false;
             ros::Rate r(10);
-            int mbf_recoveries = 0;
 
             // wait for path execution to finish
             while (ros::ok()) {
                 current_status = mbfClient->getState();
 
-                // --- survive an MBF crash: wait for respawn and re-send the goal ---
-                if (mbfDied(mbfClient, current_status)) {
-                    if (mbf_recoveries++ >= MBF_MAX_RECOVERIES ||
-                        !waitForMbfRespawn(mbfClient, "move_base")) {
-                        ROS_ERROR_STREAM("MowingBehavior: (FIRST POINT) giving up after MBF crash.");
-                        break;   // fall through to the normal "could not reach goal" handling
-                    }
-                    cancelAndDrain(mbfClientExePath, "exe_path");
-                    ros::Duration(MBF_HANDOVER_SETTLE).sleep();
-                    mbfClient->sendGoal(moveBaseGoal);
-                    current_status = actionlib::SimpleClientGoalState(actionlib::SimpleClientGoalState::PENDING);
-                    r.sleep();
-                    continue;
-                }
                 if (current_status.state_ == actionlib::SimpleClientGoalState::ACTIVE ||
                     current_status.state_ == actionlib::SimpleClientGoalState::PENDING) {
                     // path is being executed, everything seems fine.
@@ -530,12 +477,27 @@ bool MowingBehavior::execute_mowing_plan() {
                         mowerEnabled = false;
                         return false;
                     }
+                    if (!hasGoodGPS()) {
+                        ROS_WARN_STREAM("MowingBehavior: (FIRST POINT) GPS lost - stopping and waiting for GPS.");
+                        cancelAndDrain(mbfClient, "move_base");
+                        cancelAndDrain(mbfClientExePath, "exe_path");
+                        mowerEnabled = false;
+                        gps_lost = true;
+                        break;
+                    }
                 } else {
                     ROS_INFO_STREAM("MowingBehavior: (FIRST POINT)  Got status " << current_status.state_ << " from MBF/FTCPlanner -> Stopping path execution.");
                     // we're done, break out of the loop
                     break;
                 }
                 r.sleep();
+            }
+
+            // GPS loss is not a failed attempt: pause (waits for GPS), then retry the same point.
+            if (gps_lost) {
+                this->setPause();
+                update_actions();
+                continue;
             }
 
             first_point_attempt_counter++;
@@ -607,31 +569,11 @@ bool MowingBehavior::execute_mowing_plan() {
             sendGoalAndConfirm(mbfClientExePath, exePathGoal, "exe_path (mow)");
             actionlib::SimpleClientGoalState current_status(actionlib::SimpleClientGoalState::PENDING);
             ros::Rate r(10);
-            int mbf_recoveries = 0;
 
             // wait for path execution to finish
             while (ros::ok()) {
                 current_status = mbfClientExePath->getState();
 
-                // --- survive an MBF crash: wait for respawn and resume from progress ---
-                if (mbfDied(mbfClientExePath, current_status)) {
-                    if (mbf_recoveries++ >= MBF_MAX_RECOVERIES ||
-                        !waitForMbfRespawn(mbfClientExePath, "exe_path")) {
-                        ROS_ERROR_STREAM("MowingBehavior: (MOW) giving up after MBF crash.");
-                        break;
-                    }
-                    // resume: re-send only the not-yet-mown remainder of the path
-                    nav_msgs::Path resumePath;
-                    resumePath.header = path.path.header;
-                    resumePath.poses = std::vector<geometry_msgs::PoseStamped>(
-                        path.path.poses.begin() + currentMowingPathIndex, path.path.poses.end());
-                    exePathGoal.path = resumePath;
-                    exePathStartIndex = currentMowingPathIndex;
-                    mbfClientExePath->sendGoal(exePathGoal);
-                    current_status = actionlib::SimpleClientGoalState(actionlib::SimpleClientGoalState::PENDING);
-                    r.sleep();
-                    continue;
-                }
                 if (current_status.state_ == actionlib::SimpleClientGoalState::ACTIVE ||
                     current_status.state_ == actionlib::SimpleClientGoalState::PENDING) {
                     // path is being executed, everything seems fine.
@@ -662,6 +604,17 @@ bool MowingBehavior::execute_mowing_plan() {
                         ROS_INFO_STREAM("MowingBehavior: (MOW) PAUSE was requested - stopping path execution.");
                         cancelAndDrain(mbfClientExePath, "exe_path");
                         mowerEnabled = false;
+                        break; // Trim path
+                    }
+                    if (!hasGoodGPS()) {
+                        // Stop instead of mowing on dead reckoning. The pause handling at the
+                        // top waits for GPS and resumes from currentMowingPathIndex.
+                        ROS_WARN_STREAM("MowingBehavior: (MOW) GPS lost at index " << currentMowingPathIndex
+                                        << " - stopping and waiting for GPS.");
+                        cancelAndDrain(mbfClientExePath, "exe_path");
+                        mowerEnabled = false;
+                        this->setPause();
+                        update_actions();
                         break; // Trim path
                     }
                     if(current_status.state_ == actionlib::SimpleClientGoalState::ACTIVE) {
