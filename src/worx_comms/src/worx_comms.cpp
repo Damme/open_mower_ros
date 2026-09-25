@@ -433,9 +433,13 @@ void spi_thread(std::atomic<bool>& keep_running, ros::NodeHandle& n, const std::
                 std::string txMsg;
                 txMsg = spi_tx_queue.front();
                 spi_tx_queue.pop();
-                strncpy(txBuffer + 1, txMsg.c_str(), buflen);
+                // SOF + payload + EOF must fit in buflen
+                size_t len = std::min(txMsg.size(), (size_t)(buflen - 2));
+                if (len < txMsg.size())
+                    ROS_WARN_STREAM_THROTTLE(5, "SPI tx message truncated (" << txMsg.size() << " bytes)");
                 txBuffer[0] = SOF;
-                txBuffer[strlen(txBuffer)] = EOF;
+                memcpy(txBuffer + 1, txMsg.data(), len);
+                txBuffer[1 + len] = EOF;
                 //ROS_INFO("<<< %s", txBuffer + 1);
                 ROS_INFO_STREAM_THROTTLE(1, "<<< " << txMsg.c_str());
             }
@@ -445,7 +449,7 @@ void spi_thread(std::atomic<bool>& keep_running, ros::NodeHandle& n, const std::
         SPIdev->xfer(reinterpret_cast<uint8_t*>(txBuffer), buflen, reinterpret_cast<uint8_t*>(rxBuffer), buflen);
 
         // Process the received data
-        for (size_t i = 0; i <= buflen; ++i) {
+        for (size_t i = 0; i < buflen; ++i) {
             rxByte = rxBuffer[i];
             if (receiving) {
                 // If the received byte is an EOF byte, terminate the received string and store it in the receive queue
@@ -460,6 +464,12 @@ void spi_thread(std::atomic<bool>& keep_running, ros::NodeHandle& n, const std::
                     receiving=false;
                     continue;
                 } else if (rxByte != NOP) {
+                    if (rxPos >= buflen - 1) {
+                        // No EOF seen (lost/corrupted byte) - drop the message instead of overflowing the stack
+                        ROS_WARN_THROTTLE(5, "SPI rx message too long, dropping");
+                        receiving = false;
+                        continue;
+                    }
                     rxmsgBuffer[rxPos++] = rxByte;
                 }
             // If the received byte is a SOF byte, start receiving and clear the received message buffer
@@ -581,7 +591,7 @@ int main(int argc, char **argv) {
         }
 
         ParseResult result = document.Parse(rxMsg.c_str());
-        if (result) {
+        if (result && document.IsObject()) {
             if (document.HasMember("Analog")) {
                 //{"Analog":{"Rain":3850,"boardTemp":3089}} // Boardtemp raw value unknown conversion
             }
@@ -590,11 +600,11 @@ int main(int argc, char **argv) {
                 ROS_INFO_STREAM_THROTTLE(10, ">>> " << rxMsg.c_str());
                 
                 const rapidjson::Value& json = document["Battery"];
-                if (json.HasMember("mV"))
+                if (json.IsObject() && json.HasMember("mV"))
                     v_battery = (float)json["mV"].GetInt() / 1000.0;
-                if (json.HasMember("mA"))
+                if (json.IsObject() && json.HasMember("mA"))
                     charge_current = (float)json["mA"].GetInt() / 1000.0;
-                if (json.HasMember("Temp"))
+                if (json.IsObject() && json.HasMember("Temp"))
                     battery_temp = (float)json["Temp"].GetInt() / 10.0; // Really BATTERY TEMPERATURE!
             }
             if (document.HasMember("Boundary")) {
@@ -615,7 +625,8 @@ int main(int argc, char **argv) {
             if (document.HasMember("MotorPulse")) {
                 //{"MotorPulse":{"Left":890,"Right":884,"Mow":2,"DirLeft":0,"DirRight":0}}
                 ROS_INFO_STREAM_THROTTLE(2, ">>> " << rxMsg.c_str());
-                processMotorTicks(document["MotorPulse"]);
+                if (document["MotorPulse"].IsObject())
+                    processMotorTicks(document["MotorPulse"]);
             }
             if (document.HasMember("MotorPWM")) {
                 //{"MotorPWM":{"Left":0,"Right":0,"Mow":0}}
@@ -625,7 +636,8 @@ int main(int argc, char **argv) {
                 ROS_INFO_STREAM("!!! " << rxMsg.c_str());
             }
             if (document.HasMember("motorState")) {
-                motorState = document["motorState"].GetString();
+                if (document["motorState"].IsString())
+                    motorState = document["motorState"].GetString();
                 ROS_INFO_STREAM("!!! " << rxMsg.c_str());
             }
         }
