@@ -13,7 +13,7 @@ find_package(catkin REQUIRED COMPONENTS
         xbot_msgs
         geometry_msgs
         mower_map
-        slic3r_coverage_planner
+        coverage_planner
 )
 
 ## System dependencies are found with CMake's conventions

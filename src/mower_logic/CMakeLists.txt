@@ -16,7 +16,7 @@ find_package(catkin REQUIRED COMPONENTS
   nav_msgs
   rosbag
   roscpp
-  slic3r_coverage_planner
+  coverage_planner
   tf2
   tf2_geometry_msgs
   tf2_ros
@@ -120,7 +120,7 @@ generate_messages(
 catkin_package(
 #  INCLUDE_DIRS include
 #  LIBRARIES mower_logic
-#  CATKIN_DEPENDS dynamic_reconfigure ftc_local_planner mbf_msgs mower_map mower_msgs nav_msgs roscpp slic3r_coverage_planner tf2 tf2_geometry_msgs tf2_ros
+#  CATKIN_DEPENDS dynamic_reconfigure ftc_local_planner mbf_msgs mower_map mower_msgs nav_msgs roscpp coverage_planner tf2 tf2_geometry_msgs tf2_ros
 #  DEPENDS system_lib
 )
 

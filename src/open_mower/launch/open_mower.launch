@@ -29,7 +29,7 @@
         <param name="gps_wait_time" value="$(optenv OM_GPS_WAIT_TIME_SEC 10.0)"/>
         <param name="gps_timeout" value="$(optenv OM_GPS_TIMEOUT_SEC 10.0)"/>
     </node>
-    <node pkg="slic3r_coverage_planner" type="slic3r_coverage_planner" name="slic3r_coverage_planner" output="screen"/>
+    <node pkg="coverage_planner" type="coverage_planner" name="coverage_planner" output="screen"/>
 
     <node pkg="twist_mux" type="twist_mux" name="twist_mux" output="screen">
         <remap from="cmd_vel_out" to="/cmd_vel"/>

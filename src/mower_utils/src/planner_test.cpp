@@ -3,7 +3,7 @@
 // Copyright (c) 2022 Clemens Elflein. All rights reserved.
 //
 #include "ros/ros.h"
-#include "slic3r_coverage_planner/PlanPath.h"
+#include "coverage_planner/PlanPath.h"
 #include "mower_map/GetMowingAreaSrv.h"
 
 ros::ServiceClient pathClient, mapClient;
@@ -21,7 +21,7 @@ int main(int argc, char **argv) {
 
     path_pub = n.advertise<nav_msgs::Path>("mower_logic/mowing_path", 100, true);
 
-    pathClient = n.serviceClient<slic3r_coverage_planner::PlanPath>(
+    pathClient = n.serviceClient<coverage_planner::PlanPath>(
             "slic3r_coverage_planner/plan_path");
     mapClient = n.serviceClient<mower_map::GetMowingAreaSrv>(
             "mower_map_service/get_mowing_area");
@@ -42,12 +42,12 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    slic3r_coverage_planner::PlanPath pathSrv;
+    coverage_planner::PlanPath pathSrv;
     pathSrv.request.angle = 0;
     pathSrv.request.outline_count = outline_count;
     pathSrv.request.outline = mapSrv.response.area.area;
     pathSrv.request.holes = mapSrv.response.area.obstacles;
-    pathSrv.request.fill_type = slic3r_coverage_planner::PlanPathRequest::FILL_LINEAR;
+    pathSrv.request.fill_type = coverage_planner::PlanPathRequest::FILL_LINEAR;
     pathSrv.request.distance = 0.13;
     pathSrv.request.outer_offset = 0.05;
 

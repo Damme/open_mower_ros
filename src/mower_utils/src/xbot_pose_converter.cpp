@@ -3,7 +3,7 @@
 // Copyright (c) 2022 Clemens Elflein. All rights reserved.
 //
 #include "ros/ros.h"
-#include "slic3r_coverage_planner/PlanPath.h"
+#include "coverage_planner/PlanPath.h"
 #include "mower_map/GetMowingAreaSrv.h"
 #include "xbot_msgs/AbsolutePose.h"
 #include "geometry_msgs/PoseWithCovarianceStamped.h"

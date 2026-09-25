@@ -20,8 +20,8 @@
 #include "Behavior.h"
 #include "UndockingBehavior.h"
 
-#include "slic3r_coverage_planner/PlanPath.h"
-#include "slic3r_coverage_planner/Path.h"
+#include "coverage_planner/PlanPath.h"
+#include "coverage_planner/Path.h"
 #include "ftc_local_planner/PlannerGetProgress.h"
 #include "xbot_msgs/ActionInfo.h"
 
@@ -38,7 +38,7 @@ private:
 
     // Progress
     bool mowerEnabled = false;
-    std::vector<slic3r_coverage_planner::Path> currentMowingPaths;
+    std::vector<coverage_planner::Path> currentMowingPaths;
 
     ros::Time last_checkpoint;
     int currentMowingPath;

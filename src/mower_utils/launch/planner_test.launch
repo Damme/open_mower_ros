@@ -4,7 +4,7 @@
 <launch>
     <node name="rviz" pkg="rviz" type="rviz" args="-d $(find mower_utils)/rviz/planner_test.rviz" required="true" />
     <node pkg="mower_map" type="mower_map_service" name="mower_map" required="true" />
-    <node pkg="slic3r_coverage_planner" type="slic3r_coverage_planner" name="slic3r_coverage_planner" required="false" />
+    <node pkg="coverage_planner" type="coverage_planner" name="coverage_planner" required="false" />
 
     <node
             if="$(eval optenv('START_PLANNER', True))"

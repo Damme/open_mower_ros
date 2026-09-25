@@ -18,7 +18,7 @@
 // #define VERBOSE_DEBUG   1
 
 #include "ros/ros.h"
-#include "slic3r_coverage_planner/PlanPath.h"
+#include "coverage_planner/PlanPath.h"
 #include "mower_map/GetMowingAreaSrv.h"
 #include "mower_map/GetDockingPointSrv.h"
 #include "mower_map/SetDockingPointSrv.h"
@@ -566,7 +566,7 @@ int main(int argc, char **argv) {
     path_pub = n->advertise<nav_msgs::Path>("mower_logic/mowing_path", 100, true);
     high_level_state_publisher = n->advertise<mower_msgs::HighLevelStatus>("mower_logic/current_state", 100, true);
 
-    pathClient = n->serviceClient<slic3r_coverage_planner::PlanPath>(
+    pathClient = n->serviceClient<coverage_planner::PlanPath>(
             "slic3r_coverage_planner/plan_path");
     mapClient = n->serviceClient<mower_map::GetMowingAreaSrv>(
             "mower_map_service/get_mowing_area");

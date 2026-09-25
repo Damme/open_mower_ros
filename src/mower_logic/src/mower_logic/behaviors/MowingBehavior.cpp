@@ -179,13 +179,13 @@ bool MowingBehavior::create_mowing_plan(int area_index) {
     }
 
     // calculate coverage
-    slic3r_coverage_planner::PlanPath pathSrv;
+    coverage_planner::PlanPath pathSrv;
     pathSrv.request.angle = angle;
     pathSrv.request.outline_count = config.outline_count;
     pathSrv.request.outline_overlap_count = config.outline_overlap_count;
     pathSrv.request.outline = mapSrv.response.area.area;
     pathSrv.request.holes = mapSrv.response.area.obstacles;
-    pathSrv.request.fill_type = slic3r_coverage_planner::PlanPathRequest::FILL_LINEAR;
+    pathSrv.request.fill_type = coverage_planner::PlanPathRequest::FILL_LINEAR;
     pathSrv.request.outer_offset = config.outline_offset;
     pathSrv.request.distance = config.tool_width;
     if (!pathClient.call(pathSrv)) {
