@@ -85,6 +85,15 @@ namespace ftc_local_planner
         int recovery_attempts = 0;
         uint32_t recovery_last_index = 0;
 
+        // Turn assist: a PRE/POST_ROTATE that oscillates or stalls reverses a little while turning.
+        bool turnAssist(bool oscillating, geometry_msgs::TwistStamped &cmd_vel);
+        Eigen::Vector2d robot_pos{0.0, 0.0};   // latest robot position (set every control cycle)
+        bool turn_ref_valid = false;
+        Eigen::Vector2d turn_start_pos{0.0, 0.0}; // where this rotate phase started (reverse budget)
+        double turn_ref_error = 0.0;           // |angle_error| at the last progress checkpoint
+        ros::Time turn_ref_time;
+        ros::Time turn_assist_until;
+
         // Anti-runaway / slew-limit state
     double last_cmd_vel_linear = 0.0;   // previous commanded linear velocity (m/s)
     bool   carrot_gated = false;        // true while carrot held due to lag

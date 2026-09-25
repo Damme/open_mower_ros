@@ -23,6 +23,18 @@ static const double kReverseTime  = 3.0;   // s -> ~0.3 m over just-driven groun
 static const double kSkipAhead    = 0.75;   // m of path skipped, times the attempt no.
 static const int    kMaxAttempts  = 4;     // then give up: is_crashed -> MBF aborts
 
+// ---- turn assist (PRE_ROTATE / POST_ROTATE) ---------------------------------
+// A rotate phase that oscillates or makes no angular progress (wheel slipping,
+// caught in grass) reverses slowly while turning toward the target, limited to
+// a few cm per rotate phase. Replaces "oscillating -> zero angular", which froze
+// the turn until goal_timeout.
+static const double kTurnStallTime     = 3.0;   // s without kTurnMinProgress -> stalled
+static const double kTurnMinProgress   = 5.0 * M_PI / 180.0; // rad of error reduction that counts as progress
+static const double kTurnAssistTime    = 2.0;   // s per assist burst
+static const double kTurnAssistAng     = 0.4;   // rad/s (~23 deg per 1 Hz control cycle)
+static const double kTurnReverseSpeed  = 0.05;  // m/s, slow
+static const double kTurnMaxReverse    = 0.12;  // m of reverse per rotate phase
+
 namespace ftc_local_planner
 {
 
@@ -106,6 +118,16 @@ namespace ftc_local_planner
         recovery_attempts = 0;
         stuck_ref_valid = false;
 
+        // Oscillation state must not leak into a new plan: a flag set during the previous goal's
+        // POST_ROTATE otherwise zeroes every PRE_ROTATE command of the next goal. The buffer is sized
+        // for 10 Hz but MBF runs us at controller_frequency 1 Hz, so it would take ~50 s to flush.
+        failure_detector_.clear();
+        turn_ref_valid = false;
+        turn_assist_until = ros::Time(0);
+        oscillation_detected_ = false;
+        oscillation_warning_ = false;
+        time_last_oscillation_ = ros::Time::now();
+
         nav_msgs::Path path;
 
         if (global_plan.size() > 2)
@@ -170,6 +192,7 @@ namespace ftc_local_planner
         ros::Time now = ros::Time::now();
         double dt = now.toSec() - last_time.toSec();
         last_time = now;
+        robot_pos = Eigen::Vector2d(pose.pose.position.x, pose.pose.position.y);
 
         if (is_crashed)
         {
@@ -200,6 +223,8 @@ namespace ftc_local_planner
         if (new_planner_state != current_state)
         {
             ROS_INFO_STREAM("FTCLocalPlannerROS: Switching to state " << new_planner_state);
+            turn_ref_valid = false;
+            turn_assist_until = ros::Time(0);
             state_entered_time = ros::Time::now();
             current_state = new_planner_state;
         }
@@ -625,13 +650,10 @@ namespace ftc_local_planner
 
             cmd_vel.twist.angular.z = ang_speed;
 
-            // check if robot oscillates
+            // check if robot oscillates; an oscillating or stalled turn gets the turn assist
+            // (upstream spun at +max_cmd_vel_ang, a later local change zeroed it and froze the turn)
             bool is_oscillating = checkOscillation(cmd_vel);
-            if (is_oscillating)
-            {
-                ang_speed = 0.0;//config.max_cmd_vel_ang;
-                cmd_vel.twist.angular.z = ang_speed;
-            }
+            turnAssist(is_oscillating, cmd_vel);
         }
 
         if (config.debug_pid)
@@ -671,6 +693,45 @@ namespace ftc_local_planner
     bool FTCPlanner::getProgress(PlannerGetProgressRequest &req, PlannerGetProgressResponse &res)
     {
         res.index = current_index;
+        return true;
+    }
+
+    // Returns true while the assist owns cmd_vel. Called only in PRE_ROTATE / POST_ROTATE.
+    bool FTCPlanner::turnAssist(bool oscillating, geometry_msgs::TwistStamped &cmd_vel)
+    {
+        ros::Time now = ros::Time::now();
+        double err = std::fabs(angle_error);
+
+        if (!turn_ref_valid)
+        {
+            turn_ref_valid = true;
+            turn_start_pos = robot_pos;
+            turn_ref_error = err;
+            turn_ref_time = now;
+            turn_assist_until = ros::Time(0);
+        }
+        if (turn_ref_error - err > kTurnMinProgress)
+        {
+            turn_ref_error = err;              // progress: restart the stall window
+            turn_ref_time = now;
+        }
+
+        bool stalled = (now - turn_ref_time).toSec() > kTurnStallTime;
+        if ((oscillating || stalled) && now >= turn_assist_until)
+        {
+            ROS_WARN_STREAM("FTCLocalPlannerROS: turn " << (oscillating ? "oscillating" : "not progressing")
+                            << " (error " << err * 180.0 / M_PI << " deg) - reversing slowly while turning.");
+            turn_assist_until = now + ros::Duration(kTurnAssistTime);
+            turn_ref_error = err;              // give the assist a fresh window
+            turn_ref_time = now;
+        }
+        if (now >= turn_assist_until)
+        {
+            return false;
+        }
+
+        cmd_vel.twist.angular.z = (angle_error >= 0.0 ? 1.0 : -1.0) * std::min(kTurnAssistAng, config.max_cmd_vel_ang);
+        cmd_vel.twist.linear.x = (robot_pos - turn_start_pos).norm() < kTurnMaxReverse ? -kTurnReverseSpeed : 0.0;
         return true;
     }
 
